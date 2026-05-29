@@ -1,18 +1,15 @@
 import type { Plugin, PluginInput } from '@opencode-ai/plugin'
 import {
-  autoDetectLiteLLM,
-  checkLiteLLMHealth,
-  discoverLiteLLMModels,
+  checkHealth,
+  discoverModels,
   normalizeBaseURL,
 } from '../utils/litellm-api'
 import {
   formatModelName,
-  extractModelOwner,
   categorizeModel,
 } from '../utils/format-model-name'
 import type { LiteLLMModel } from '../types'
 
-const CHAT_PROVIDER_ID = 'litellm'
 const DISCOVERY_TIMEOUT_MS = 5000
 
 /**
@@ -33,7 +30,7 @@ function readCustomHeaders(
 }
 
 /**
- * Convert a discovered LiteLLM model into an OpenCode config-level
+ * Convert a discovered model into an OpenCode config-level
  * model entry (the shape used in `provider.*.models` inside
  * `opencode.json`).
  */
@@ -55,166 +52,118 @@ function toConfigModel(model: LiteLLMModel): Record<string, unknown> {
     entry.attachment = true
   }
   if (type === 'embedding' || type === 'image' || type === 'audio') {
-    // skip non-chat models from the config — they can't be used as
-    // primary chat models and would clutter the picker.
     return entry
   }
   return entry
 }
 
 /**
- * LiteLLM Plugin for OpenCode.
+ * OpenCode Provider Plugin.
  *
- * Uses the `config` hook to discover models from a LiteLLM proxy and
- * inject them into the provider's `models` map at startup. This is the
- * only reliable way to dynamically populate a provider — the
- * `provider.models` hook is not called by OpenCode for custom providers.
+ * Uses the `config` hook to discover models from any
+ * `@ai-sdk/openai-compatible` provider's `/v1/models` endpoint and
+ * inject them into the provider's `models` map at startup.
  *
- * Configure the provider in your `opencode.json`:
+ * Configure providers in your `opencode.json`:
  *
+ * ```json
  * {
  *   "plugin": ["opencode-plugin-litellm@latest"],
  *   "provider": {
- *     "litellm": {
+ *     "my-provider": {
  *       "npm": "@ai-sdk/openai-compatible",
- *       "name": "LiteLLM (proxy)",
+ *       "name": "My Provider",
  *       "options": {
- *         "baseURL": "http://localhost:4000/v1",
- *         "apiKey": "{env:LITELLM_API_KEY}"
+ *         "baseURL": "http://localhost:4000/v1"
  *       }
  *     }
  *   }
  * }
+ * ```
  */
 export const LiteLLMPlugin: Plugin = async (_input: PluginInput) => {
   return {
     config: async (config: any) => {
-      // Ensure the provider entry exists
-      if (!config.provider) config.provider = {}
+      if (!config.provider) return
 
-      const existing = config.provider[CHAT_PROVIDER_ID] as
-        | Record<string, unknown>
-        | undefined
-      const options = (existing?.options ?? {}) as Record<string, unknown>
-      const configuredBase =
-        typeof options.baseURL === 'string' ? options.baseURL : undefined
-      const configuredKey =
-        typeof options.apiKey === 'string' && options.apiKey
-          ? options.apiKey
-          : undefined
-      const envKey =
-        process.env.LITELLM_API_KEY ?? process.env.LITELLM_MASTER_KEY
-      const apiKey = configuredKey ?? envKey
-      const customHeaders = readCustomHeaders(options)
+      for (const [providerId, raw] of Object.entries(config.provider)) {
+        const entry = raw as Record<string, unknown>
+        if (entry.npm !== '@ai-sdk/openai-compatible') continue
 
-      // Resolve base URL
-      let baseURL: string | null = null
-      if (configuredBase) {
-        baseURL = normalizeBaseURL(configuredBase)
-      } else {
-        baseURL = await autoDetectLiteLLM(apiKey, customHeaders)
-      }
+        if (!entry.npm) entry.npm = '@ai-sdk/openai-compatible'
 
-      if (!baseURL) {
-        console.warn(
-          '[opencode-litellm] No LiteLLM proxy found. Configure provider.litellm.options.baseURL or start LiteLLM on port 4000/8000/8080.',
-        )
-        return
-      }
+        const options = (entry.options ?? {}) as Record<string, unknown>
+        const configuredBase =
+          typeof options.baseURL === 'string' ? options.baseURL : undefined
+        const apiKey =
+          typeof options.apiKey === 'string' && options.apiKey
+            ? options.apiKey
+            : undefined
+        const customHeaders = readCustomHeaders(options)
 
-      // Create provider entry if it doesn't exist
-      if (!existing) {
-        config.provider[CHAT_PROVIDER_ID] = {
-          npm: '@ai-sdk/openai-compatible',
-          name: 'LiteLLM (proxy)',
-          options: {
-            baseURL: `${baseURL}/v1`,
-          },
-          models: {},
+        if (!configuredBase) continue
+
+        const baseURL = normalizeBaseURL(configuredBase)
+
+        if (!entry.options) {
+          entry.options = { baseURL: `${baseURL}/v1` }
         }
-      }
+        if (!entry.models) {
+          entry.models = {}
+        }
+        const models = entry.models as Record<string, unknown>
 
-      const provider = config.provider[CHAT_PROVIDER_ID] as Record<
-        string,
-        unknown
-      >
+        const work = async () => {
+          if (!(await checkHealth(baseURL, apiKey, customHeaders))) {
+            console.warn(
+              `[opencode-litellm] Provider "${providerId}" appears offline or unauthorized at ${baseURL}`,
+            )
+            return
+          }
 
-      // Ensure npm is set
-      if (!provider.npm) {
-        provider.npm = '@ai-sdk/openai-compatible'
-      }
+          let discovered: LiteLLMModel[]
+          try {
+            discovered = await discoverModels(baseURL, apiKey, customHeaders)
+          } catch (error) {
+            console.warn(
+              `[opencode-litellm] Model discovery failed for provider "${providerId}":`,
+              error instanceof Error ? error.message : String(error),
+            )
+            return
+          }
 
-      // Ensure options.baseURL is set
-      if (!provider.options) {
-        provider.options = { baseURL: `${baseURL}/v1` }
-      }
+          if (discovered.length === 0) {
+            console.warn(
+              `[opencode-litellm] Provider "${providerId}" responded but exposed zero models.`,
+            )
+            return
+          }
 
-      // Ensure models map exists
-      if (!provider.models) {
-        provider.models = {}
-      }
+          for (const model of discovered) {
+            if (models[model.id]) continue
+            models[model.id] = toConfigModel(model)
+          }
 
-      const models = provider.models as Record<string, unknown>
+          if (models['_'] && Object.keys(models).length > 1) {
+            delete models['_']
+          }
 
-      // Discover models with timeout
-      const work = async () => {
-        if (!(await checkLiteLLMHealth(baseURL!, apiKey, customHeaders))) {
-          console.warn(
-            `[opencode-litellm] LiteLLM appears offline or unauthorized at ${baseURL}`,
+          console.log(
+            `[opencode-litellm] Discovered ${discovered.length} models from ${providerId} (${baseURL})`,
           )
-          return
         }
 
-        let discovered: LiteLLMModel[]
-        try {
-          discovered = await discoverLiteLLMModels(
-            baseURL!,
-            apiKey,
-            customHeaders,
-          )
-        } catch (error) {
-          console.warn(
-            '[opencode-litellm] Model discovery failed:',
-            error instanceof Error ? error.message : String(error),
-          )
-          return
-        }
-
-        if (discovered.length === 0) {
-          console.warn(
-            '[opencode-litellm] LiteLLM responded but exposed zero models.',
-          )
-          return
-        }
-
-        for (const model of discovered) {
-          // Don't overwrite user-curated entries
-          if (models[model.id]) continue
-          models[model.id] = toConfigModel(model)
-        }
-
-        // Remove the seed placeholder if real models were discovered
-        if (models['_'] && Object.keys(models).length > 1) {
-          delete models['_']
-        }
-
-        console.log(
-          `[opencode-litellm] Discovered ${discovered.length} models from ${baseURL}`,
-        )
+        await Promise.race([
+          work(),
+          new Promise<void>((resolve) =>
+            setTimeout(resolve, DISCOVERY_TIMEOUT_MS),
+          ),
+        ])
       }
-
-      await Promise.race([
-        work(),
-        new Promise<void>((resolve) =>
-          setTimeout(resolve, DISCOVERY_TIMEOUT_MS),
-        ),
-      ])
     },
   }
 }
 
-// Re-export the responses plugin for backwards compat, but it's now a no-op.
-// The config hook approach handles all models in a single provider.
 export const LiteLLMResponsesPlugin: Plugin = async (_input: PluginInput) => {
   return {}
 }
