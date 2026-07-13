@@ -38,6 +38,7 @@ function toConfigModel(model: LiteLLMModel): Record<string, unknown> {
   const type = categorizeModel(model)
   const entry: Record<string, unknown> = {
     name: formatModelName(model),
+    reasoning: true,
   }
   if (model.max_input_tokens || model.max_output_tokens) {
     entry.limit = {
@@ -81,6 +82,13 @@ function toConfigModel(model: LiteLLMModel): Record<string, unknown> {
  * }
  * ```
  */
+type Discovered = {
+  models: LiteLLMModel[]
+  baseURL: string
+}
+
+const discoveredCache = new Map<string, Discovered>()
+
 export const LiteLLMPlugin: Plugin = async (_input: PluginInput) => {
   return {
     config: async (config: any) => {
@@ -113,6 +121,15 @@ export const LiteLLMPlugin: Plugin = async (_input: PluginInput) => {
         }
         const models = entry.models as Record<string, unknown>
 
+        const cached = discoveredCache.get(providerId)
+        if (cached) {
+          for (const model of cached.models) {
+            if (models[model.id]) continue
+            models[model.id] = toConfigModel(model)
+          }
+          continue
+        }
+
         const work = async () => {
           if (!(await checkHealth(baseURL, apiKey, customHeaders))) {
             console.warn(
@@ -138,6 +155,8 @@ export const LiteLLMPlugin: Plugin = async (_input: PluginInput) => {
             )
             return
           }
+
+          discoveredCache.set(providerId, { models: discovered, baseURL })
 
           for (const model of discovered) {
             if (models[model.id]) continue
