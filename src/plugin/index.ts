@@ -111,6 +111,9 @@ export const LiteLLMPlugin: Plugin = async (_input: PluginInput) => {
 
         if (!configuredBase) continue
 
+        const modelsDiscovery = options.modelsDiscovery !== false
+        if (!modelsDiscovery) continue
+
         const baseURL = normalizeBaseURL(configuredBase)
 
         if (!entry.options) {
