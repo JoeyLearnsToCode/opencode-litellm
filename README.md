@@ -259,15 +259,8 @@ npm run typecheck
 
 ```
 src/
-├── index.ts                    # Public exports
-├── types/index.ts              # API types
-├── utils/
-│   ├── litellm-api.ts          # /v1/models discovery (health check, fetch)
-│   └── format-model-name.ts    # owner extraction, name formatting, categorization
-└── plugin/
-    ├── index.ts                # LiteLLMPlugin — config hook entry
-    ├── discover.ts             # V2 SDK-level discoverBucket
-    └── build-model.ts          # V2 Model object builder
+├── index.ts                    # Public re-exports
+└── model-discoverer.ts         # 🎯 Single-file plugin — all logic in one place
 ```
 
 See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the contributor workflow.

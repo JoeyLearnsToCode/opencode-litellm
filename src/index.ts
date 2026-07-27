@@ -1,2 +1,2 @@
-export { LiteLLMPlugin, LiteLLMResponsesPlugin } from './plugin'
-export * from './types'
+export { ModelDiscovererPlugin, default } from './model-discoverer'
+export type { DiscoveredModel, ModelsResponse, ModelType } from './model-discoverer'
